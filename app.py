@@ -39,30 +39,26 @@ if uploaded_file is not None:
     # ------------------------
     # 3️⃣ Align features with trained scaler
     # ------------------------
-    trained_features = [
-        'TransactionAmount','AccountBalance','TransactionDuration','LoginAttempts',
-        'TimeSinceLastTxn','TxnCount_24h','TxnCount_1h','IsOddHour',
-        'MerchantNovelty','MerchantFrequency'
-    ]
-
-    # Create missing features if they don't exist
-    for col in trained_features:
-        if col not in df_new.columns:
-            df_new[col] = 0
-
-    # Select and reorder features exactly as trained
-    features_df = df_new[trained_features].fillna(0)
-
-    # ------------------------
-    # 4️⃣ Load scaler & Isolation Forest
-    # ------------------------
+    # Load scaler and model
     scaler = joblib.load("scaler.pkl")
     iso_forest = joblib.load("isolation_forest.pkl")
 
-    # Scale features
-    X_scaled = scaler.transform(features_df)
+    # Ensure features_df has same columns and order as scaler
+    if hasattr(scaler, 'feature_names_in_'):
+        # Fill missing columns with 0
+        for col in scaler.feature_names_in_:
+            if col not in df_new.columns:
+                df_new[col] = 0
+        # Select and order features exactly as trained
+        features_df = df_new[scaler.feature_names_in_].fillna(0)
+    else:
+        st.error("Scaler does not have feature_names_in_ attribute. Make sure it was trained on a DataFrame.")
+        st.stop()
 
-    # Predict anomalies
+    # ------------------------
+    # 4️⃣ Scale features and predict anomalies
+    # ------------------------
+    X_scaled = scaler.transform(features_df)
     df_new['AnomalyScore'] = iso_forest.decision_function(X_scaled)
     df_new['IsAnomaly'] = iso_forest.predict(X_scaled) == -1
 
@@ -72,13 +68,11 @@ if uploaded_file is not None:
     st.subheader("Suspicious Transactions")
     st.dataframe(df_new[df_new['IsAnomaly']])
 
-    # Plot anomaly scores
     st.subheader("Anomaly Score Distribution")
     plt.figure(figsize=(10,5))
     sns.histplot(df_new['AnomalyScore'], bins=50, kde=True)
     st.pyplot(plt)
 
-    # Top accounts by anomalies
     top_accounts = df_new[df_new['IsAnomaly']].groupby('AccountID').size().sort_values(ascending=False).head(10)
     st.subheader("Top 10 Accounts by Number of Anomalies")
     st.bar_chart(top_accounts)
