@@ -1,0 +1,14 @@
+from sklearn.ensemble import IsolationForest
+import joblib
+
+# Assume X_scaled is your scaled feature matrix
+iso_forest = IsolationForest(
+    n_estimators=100,
+    max_samples='auto',
+    contamination=0.05,
+    random_state=42
+)
+iso_forest.fit(X_scaled)
+
+# Save to a .pkl file
+joblib.dump(iso_forest, "isolation_forest.pkl")
