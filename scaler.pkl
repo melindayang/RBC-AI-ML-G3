@@ -1,0 +1,9 @@
+from sklearn.preprocessing import StandardScaler
+import joblib
+
+# Assume X is your feature matrix (features_df)
+scaler = StandardScaler()
+scaler.fit(X)  # Fit on your training/features data
+
+# Save to a .pkl file
+joblib.dump(scaler, "scaler.pkl")
