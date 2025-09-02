@@ -22,20 +22,38 @@ if uploaded_file is not None:
     # ------------------------
     # 2️⃣ Feature Engineering
     # ------------------------
-    df_new['TransactionDate'] = pd.to_datetime(df_new['TransactionDate'], format='%Y-%m-%d %H:%M:%S')
+    df_new['TransactionDate'] = pd.to_datetime(
+        df_new['TransactionDate'], format='%Y-%m-%d %H:%M:%S'
+    )
     df_new = df_new.sort_values(['AccountID', 'TransactionDate'])
     df_new['PrevTransactionDate'] = df_new.groupby('AccountID')['TransactionDate'].shift(1)
 
     # Time-based features
-    df_new['TimeSinceLastTxn'] = (df_new['TransactionDate'] - df_new['PrevTransactionDate']).dt.total_seconds().fillna(0)
-    df_new['TxnCount_24h'] = df_new.groupby('AccountID').rolling('24h', on='TransactionDate')['TransactionID'].count().reset_index(level=0, drop=True)
-    df_new['TxnCount_1h'] = df_new.groupby('AccountID').rolling('1h', on='TransactionDate')['TransactionID'].count().reset_index(level=0, drop=True)
+    df_new['TimeSinceLastTxn'] = (
+        df_new['TransactionDate'] - df_new['PrevTransactionDate']
+    ).dt.total_seconds().fillna(0)
+    df_new['TxnCount_24h'] = (
+        df_new.groupby('AccountID')
+        .rolling('24h', on='TransactionDate')['TransactionID']
+        .count()
+        .reset_index(level=0, drop=True)
+    )
+    df_new['TxnCount_1h'] = (
+        df_new.groupby('AccountID')
+        .rolling('1h', on='TransactionDate')['TransactionID']
+        .count()
+        .reset_index(level=0, drop=True)
+    )
     df_new['Hour'] = df_new['TransactionDate'].dt.hour
     df_new['IsOddHour'] = df_new['Hour'].apply(lambda x: 1 if x < 6 or x > 22 else 0)
 
     # Merchant features
-    df_new['MerchantNovelty'] = df_new.groupby('AccountID')['MerchantID'].transform(lambda x: (~x.duplicated()).astype(int))
-    df_new['MerchantFrequency'] = df_new.groupby(['AccountID','MerchantID'])['TransactionID'].transform('count')
+    df_new['MerchantNovelty'] = df_new.groupby('AccountID')['MerchantID'].transform(
+        lambda x: (~x.duplicated()).astype(int)
+    )
+    df_new['MerchantFrequency'] = df_new.groupby(['AccountID', 'MerchantID'])[
+        'TransactionID'
+    ].transform('count')
 
     # ------------------------
     # 3️⃣ Align features with trained scaler
@@ -49,7 +67,10 @@ if uploaded_file is not None:
                 df_new[col] = 0
         features_df = df_new[scaler.feature_names_in_].fillna(0)
     else:
-        st.error("Scaler does not have feature_names_in_ attribute. Make sure it was trained on a DataFrame.")
+        st.error(
+            "Scaler does not have feature_names_in_ attribute. "
+            "Make sure it was trained on a DataFrame."
+        )
         st.stop()
 
     # ------------------------
@@ -65,11 +86,9 @@ if uploaded_file is not None:
     explainer = shap.Explainer(iso_forest, X_scaled)
     shap_values = explainer(X_scaled)  # shape: (n_samples, n_features)
 
-    # Get top feature contributing to anomaly for each transaction
     top_features = []
     top_feature_values = []
     for i in range(shap_values.values.shape[0]):
-        # Absolute SHAP value for importance
         feature_idx = np.argmax(np.abs(shap_values.values[i]))
         top_features.append(features_df.columns[feature_idx])
         top_feature_values.append(shap_values.values[i][feature_idx])
@@ -78,28 +97,68 @@ if uploaded_file is not None:
     df_new['TopFeatureImpact'] = top_feature_values
 
     # ------------------------
-    # 5️⃣ Display results
+    # 5️⃣ Suspicious transactions with expanders
     # ------------------------
-    st.subheader("Suspicious Transactions with Feature Explanation")
-    st.dataframe(
-        df_new[df_new['IsAnomaly']][
-            ['TransactionID','AccountID','AnomalyScore','TopAnomalyFeature','TopFeatureImpact']
-        ]
-    )
+    st.subheader("Suspicious Transactions")
 
+    anomalies = df_new[df_new['IsAnomaly']]
+
+    for idx, row in anomalies.iterrows():
+        with st.expander(f"Transaction {row['TransactionID']} (Account {row['AccountID']})"):
+            # Original transaction details
+            st.write("**Transaction Details:**")
+            details = {
+                "TransactionID": row['TransactionID'],
+                "AccountID": row['AccountID'],
+                "MerchantID": row['MerchantID'],
+                "TransactionDate": str(row['TransactionDate']),
+            }
+            if 'Amount' in row:
+                details["Amount"] = row['Amount']
+            st.json(details)
+
+            # Reason flagged
+            st.write("**Reason flagged as suspicious:**")
+            st.write(f"- Feature: `{row['TopAnomalyFeature']}`")
+            st.write(f"- Impact score: {row['TopFeatureImpact']:.4f}")
+            st.write(f"- Anomaly score: {row['AnomalyScore']:.4f}")
+
+    # ------------------------
+    # 6️⃣ Top suspicious merchants
+    # ------------------------
+    st.subheader("Top 10 Suspicious Merchants")
+
+    top_merchants = anomalies.groupby('MerchantID').size().sort_values(ascending=False).head(10)
+
+    for merchant_id, count in top_merchants.items():
+        with st.expander(f"Merchant {merchant_id} — {count} suspicious transactions"):
+            merchant_anomalies = anomalies[anomalies['MerchantID'] == merchant_id]
+
+            for idx, row in merchant_anomalies.iterrows():
+                with st.expander(f"Transaction {row['TransactionID']} (Account {row['AccountID']})"):
+                    st.write("**Transaction Details:**")
+                    details = {
+                        "TransactionID": row['TransactionID'],
+                        "AccountID": row['AccountID'],
+                        "TransactionDate": str(row['TransactionDate']),
+                    }
+                    if 'Amount' in row:
+                        details["Amount"] = row['Amount']
+                    st.json(details)
+
+                    st.write("**Reason flagged as suspicious:**")
+                    st.write(f"- Feature: `{row['TopAnomalyFeature']}`")
+                    st.write(f"- Impact score: {row['TopFeatureImpact']:.4f}")
+                    st.write(f"- Anomaly score: {row['AnomalyScore']:.4f}")
+
+    # ------------------------
+    # 7️⃣ Distribution and overview
+    # ------------------------
     st.subheader("Anomaly Score Distribution")
-    plt.figure(figsize=(10,5))
+    plt.figure(figsize=(10, 5))
     sns.histplot(df_new['AnomalyScore'], bins=50, kde=True)
     st.pyplot(plt)
 
-    top_accounts = df_new[df_new['IsAnomaly']].groupby('AccountID').size().sort_values(ascending=False).head(10)
     st.subheader("Top 10 Accounts by Number of Anomalies")
+    top_accounts = anomalies.groupby('AccountID').size().sort_values(ascending=False).head(10)
     st.bar_chart(top_accounts)
-
-    # Optional: SHAP summary plot for all anomalies
-    st.subheader("SHAP Summary Plot for Anomalies")
-    anomaly_idx = np.where(df_new['IsAnomaly'])[0]
-    shap_values_anomalies = shap_values.values[anomaly_idx]
-    plt.figure(figsize=(12,6))
-    shap.summary_plot(shap_values_anomalies, features_df.iloc[anomaly_idx], plot_type="bar", show=False)
-    st.pyplot(plt)
