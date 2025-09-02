@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
 import shap
 
 st.set_page_config(page_title="Fraud Detection Dashboard", layout="wide")
@@ -84,7 +82,7 @@ if uploaded_file is not None:
     # 4️⃣b Compute SHAP values for feature explanation
     # ------------------------
     explainer = shap.Explainer(iso_forest, X_scaled)
-    shap_values = explainer(X_scaled)  # shape: (n_samples, n_features)
+    shap_values = explainer(X_scaled)
 
     top_features = []
     top_feature_values = []
@@ -97,31 +95,59 @@ if uploaded_file is not None:
     df_new['TopFeatureImpact'] = top_feature_values
 
     # ------------------------
-    # 5️⃣ Suspicious transactions with expanders
+    # 5️⃣ Suspicious transactions (paginated view)
     # ------------------------
     st.subheader("Suspicious Transactions")
 
-    anomalies = df_new[df_new['IsAnomaly']]
+    anomalies = df_new[df_new['IsAnomaly']].reset_index(drop=True)
+    page_size = st.slider("Transactions per page", 5, 20, 10)
+    total_pages = int(np.ceil(len(anomalies) / page_size))
+    page_num = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
 
-    for idx, row in anomalies.iterrows():
+    start_idx = (page_num - 1) * page_size
+    end_idx = start_idx + page_size
+    anomalies_page = anomalies.iloc[start_idx:end_idx]
+
+    for idx, row in anomalies_page.iterrows():
         with st.expander(f"Transaction {row['TransactionID']} (Account {row['AccountID']})"):
-            # Original transaction details
+            # Default transaction details
             st.write("**Transaction Details:**")
-            details = {
+            st.json({
                 "TransactionID": row['TransactionID'],
                 "AccountID": row['AccountID'],
                 "MerchantID": row['MerchantID'],
                 "TransactionDate": str(row['TransactionDate']),
-            }
-            if 'Amount' in row:
-                details["Amount"] = row['Amount']
-            st.json(details)
+                "TransactionAmount": row.get("TransactionAmount", "N/A"),
+            })
+
+            # Additional details
+            with st.expander("Additional Details"):
+                extra_cols = [
+                    "TransactionType", "Location", "DeviceID", "IP Address", "Channel",
+                    "CustomerAge", "CustomerOccupation", "TransactionDuration",
+                    "LoginAttempts", "AccountBalance", "PrevTransactionDate"
+                ]
+                extra_data = {col: row[col] for col in extra_cols if col in row}
+                st.json(extra_data)
 
             # Reason flagged
             st.write("**Reason flagged as suspicious:**")
-            st.write(f"- Feature: `{row['TopAnomalyFeature']}`")
+            flagged_feature = row['TopAnomalyFeature']
+            st.write(f"- Feature: `{flagged_feature}`")
             st.write(f"- Impact score: {row['TopFeatureImpact']:.4f}")
             st.write(f"- Anomaly score: {row['AnomalyScore']:.4f}")
+
+            # Contextual raw values for the flagged feature
+            if flagged_feature == "TimeSinceLastTxn":
+                st.write(f"- Transaction time: {row['TransactionDate']}")
+                st.write(f"- Previous transaction time: {row['PrevTransactionDate']}")
+            elif flagged_feature in ["TxnCount_24h", "TxnCount_1h"]:
+                st.write(f"- Value: {row[flagged_feature]}")
+            elif flagged_feature == "IsOddHour":
+                st.write(f"- Hour of day: {row['Hour']}")
+            elif flagged_feature in ["MerchantNovelty", "MerchantFrequency"]:
+                st.write(f"- Merchant ID: {row['MerchantID']}")
+                st.write(f"- Merchant frequency: {row['MerchantFrequency']}")
 
     # ------------------------
     # 6️⃣ Top suspicious merchants
@@ -137,28 +163,35 @@ if uploaded_file is not None:
             for idx, row in merchant_anomalies.iterrows():
                 with st.expander(f"Transaction {row['TransactionID']} (Account {row['AccountID']})"):
                     st.write("**Transaction Details:**")
-                    details = {
+                    st.json({
                         "TransactionID": row['TransactionID'],
                         "AccountID": row['AccountID'],
                         "TransactionDate": str(row['TransactionDate']),
-                    }
-                    if 'Amount' in row:
-                        details["Amount"] = row['Amount']
-                    st.json(details)
+                        "TransactionAmount": row.get("TransactionAmount", "N/A"),
+                    })
+
+                    with st.expander("Additional Details"):
+                        extra_cols = [
+                            "TransactionType", "Location", "DeviceID", "IP Address", "Channel",
+                            "CustomerAge", "CustomerOccupation", "TransactionDuration",
+                            "LoginAttempts", "AccountBalance", "PrevTransactionDate"
+                        ]
+                        extra_data = {col: row[col] for col in extra_cols if col in row}
+                        st.json(extra_data)
 
                     st.write("**Reason flagged as suspicious:**")
-                    st.write(f"- Feature: `{row['TopAnomalyFeature']}`")
+                    flagged_feature = row['TopAnomalyFeature']
+                    st.write(f"- Feature: `{flagged_feature}`")
                     st.write(f"- Impact score: {row['TopFeatureImpact']:.4f}")
                     st.write(f"- Anomaly score: {row['AnomalyScore']:.4f}")
 
-    # ------------------------
-    # 7️⃣ Distribution and overview
-    # ------------------------
-    st.subheader("Anomaly Score Distribution")
-    plt.figure(figsize=(10, 5))
-    sns.histplot(df_new['AnomalyScore'], bins=50, kde=True)
-    st.pyplot(plt)
-
-    st.subheader("Top 10 Accounts by Number of Anomalies")
-    top_accounts = anomalies.groupby('AccountID').size().sort_values(ascending=False).head(10)
-    st.bar_chart(top_accounts)
+                    if flagged_feature == "TimeSinceLastTxn":
+                        st.write(f"- Transaction time: {row['TransactionDate']}")
+                        st.write(f"- Previous transaction time: {row['PrevTransactionDate']}")
+                    elif flagged_feature in ["TxnCount_24h", "TxnCount_1h"]:
+                        st.write(f"- Value: {row[flagged_feature]}")
+                    elif flagged_feature == "IsOddHour":
+                        st.write(f"- Hour of day: {row['Hour']}")
+                    elif flagged_feature in ["MerchantNovelty", "MerchantFrequency"]:
+                        st.write(f"- Merchant ID: {row['MerchantID']}")
+                        st.write(f"- Merchant frequency: {row['MerchantFrequency']}")
