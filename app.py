@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import euclidean_distances
 
 st.set_page_config(page_title="Fraud Detection Dashboard", layout="wide")
 st.title("Financial Fraud Detection Dashboard")
@@ -23,19 +24,17 @@ if uploaded_file is not None:
     df_new = df_new.sort_values(['AccountID', 'TransactionDate'])
     df_new['PrevTransactionDate'] = df_new.groupby('AccountID')['TransactionDate'].shift(1)
 
-    # Time-based features
     df_new['TimeSinceLastTxn'] = (df_new['TransactionDate'] - df_new['PrevTransactionDate']).dt.total_seconds().fillna(0)
     df_new['TxnCount_24h'] = df_new.groupby('AccountID').rolling('24h', on='TransactionDate')['TransactionID'].count().reset_index(level=0, drop=True)
     df_new['TxnCount_1h'] = df_new.groupby('AccountID').rolling('1h', on='TransactionDate')['TransactionID'].count().reset_index(level=0, drop=True)
     df_new['Hour'] = df_new['TransactionDate'].dt.hour
     df_new['IsOddHour'] = df_new['Hour'].apply(lambda x: 1 if x < 6 or x > 22 else 0)
 
-    # Merchant features
     df_new['MerchantNovelty'] = df_new.groupby('AccountID')['MerchantID'].transform(lambda x: (~x.duplicated()).astype(int))
     df_new['MerchantFrequency'] = df_new.groupby(['AccountID','MerchantID'])['TransactionID'].transform('count')
 
     # ------------------------
-    # 3️⃣ Align features with trained scaler
+    # 3️⃣ Load models and align features
     # ------------------------
     scaler = joblib.load("scaler.pkl")
     iso_forest = joblib.load("isolation_forest.pkl")
@@ -46,7 +45,7 @@ if uploaded_file is not None:
                 df_new[col] = 0
         features_df = df_new[scaler.feature_names_in_].fillna(0)
     else:
-        st.error("Scaler does not have feature_names_in_. Make sure it was trained on a DataFrame.")
+        st.error("Scaler missing feature names. Retrain scaler with a DataFrame.")
         st.stop()
 
     # ------------------------
@@ -56,7 +55,7 @@ if uploaded_file is not None:
     df_new['AnomalyScore'] = iso_forest.decision_function(X_scaled)
 
     # Force ~5% anomalies
-    threshold = np.percentile(df_new['AnomalyScore'], 5)  # bottom 5%
+    threshold = np.percentile(df_new['AnomalyScore'], 5)
     df_new['IsAnomaly'] = df_new['AnomalyScore'] <= threshold
 
     # ------------------------
@@ -69,8 +68,7 @@ if uploaded_file is not None:
     if flagged.empty:
         st.info("No suspicious transactions detected at the 5% threshold.")
     else:
-        # Paginate flagged transactions (5 per page)
-        items_per_page = 5
+        items_per_page = 10
         total_pages = int(np.ceil(len(flagged) / items_per_page))
         page = st.number_input("Page", 1, total_pages, 1)
 
@@ -78,8 +76,11 @@ if uploaded_file is not None:
         end_idx = start_idx + items_per_page
         page_data = flagged.iloc[start_idx:end_idx]
 
+        # Compute distances once for efficiency
+        distances = euclidean_distances(X_scaled, X_scaled)
+
         for _, row in page_data.iterrows():
-            with st.container():
+            with st.expander(f"Transaction {row['TransactionID']} — Account {row['AccountID']}"):
                 st.markdown(f"""
                     **TransactionID:** {row['TransactionID']}  
                     **AccountID:** {row['AccountID']}  
@@ -88,7 +89,7 @@ if uploaded_file is not None:
                     **TransactionAmount:** {row['TransactionAmount']}
                 """)
 
-                # Expandable section for additional details
+                # Additional Details
                 with st.expander("Additional Details"):
                     st.write({
                         "TransactionType": row.get("TransactionType", None),
@@ -110,9 +111,9 @@ if uploaded_file is not None:
                     if row['TimeSinceLastTxn'] > df_new['TimeSinceLastTxn'].quantile(0.95):
                         reasons.append(f"Unusual gap since last transaction ({row['PrevTransactionDate']} → {row['TransactionDate']})")
                     if row['TxnCount_24h'] > df_new['TxnCount_24h'].quantile(0.95):
-                        reasons.append(f"Unusually high #transactions in 24h ({row['TxnCount_24h']})")
+                        reasons.append(f"High number of transactions in 24h ({row['TxnCount_24h']})")
                     if row['TxnCount_1h'] > df_new['TxnCount_1h'].quantile(0.95):
-                        reasons.append(f"Unusually high #transactions in 1h ({row['TxnCount_1h']})")
+                        reasons.append(f"High number of transactions in 1h ({row['TxnCount_1h']})")
                     if row['IsOddHour'] == 1:
                         reasons.append(f"Transaction at odd hour ({row['Hour']}h)")
                     if row['MerchantNovelty'] == 1:
@@ -123,6 +124,38 @@ if uploaded_file is not None:
                             st.write("- " + r)
                     else:
                         st.write("No single dominant feature; flagged by anomaly model.")
+
+                # Similar Transactions (non-flagged, nearest in feature space)
+                with st.expander("Similar Transactions (for reference)"):
+                    txn_idx = df_new.index.get_loc(row.name)
+                    dists = distances[txn_idx]
+                    similar_idxs = np.argsort(dists)[1:21]  # top 20 closest
+                    similar = df_new.iloc[similar_idxs]
+                    similar = similar[~similar['IsAnomaly']].head(10)
+
+                    for _, srow in similar.iterrows():
+                        with st.expander(f"Similar Txn {srow['TransactionID']} — Account {srow['AccountID']}"):
+                            st.markdown(f"""
+                                **TransactionID:** {srow['TransactionID']}  
+                                **AccountID:** {srow['AccountID']}  
+                                **MerchantID:** {srow['MerchantID']}  
+                                **Date:** {srow['TransactionDate']}  
+                                **TransactionAmount:** {srow['TransactionAmount']}
+                            """)
+                            with st.expander("Additional Details"):
+                                st.write({
+                                    "TransactionType": srow.get("TransactionType", None),
+                                    "Location": srow.get("Location", None),
+                                    "DeviceID": srow.get("DeviceID", None),
+                                    "IP Address": srow.get("IPAddress", None),
+                                    "Channel": srow.get("Channel", None),
+                                    "CustomerAge": srow.get("CustomerAge", None),
+                                    "CustomerOccupation": srow.get("CustomerOccupation", None),
+                                    "TransactionDuration": srow.get("TransactionDuration", None),
+                                    "LoginAttempts": srow.get("LoginAttempts", None),
+                                    "AccountBalance": srow.get("AccountBalance", None),
+                                    "PreviousTransactionDate": srow.get("PrevTransactionDate", None),
+                                })
 
         # ------------------------
         # 6️⃣ Suspicious Merchants
@@ -135,10 +168,29 @@ if uploaded_file is not None:
             merchant_txns = flagged[flagged['MerchantID'] == merchant]
 
             for _, row in merchant_txns.iterrows():
-                with st.expander(f"Transaction {row['TransactionID']}"):
-                    st.write({
-                        "AccountID": row['AccountID'],
-                        "Date": row['TransactionDate'],
-                        "TransactionAmount": row['TransactionAmount'],
-                        "Reason": row['AnomalyScore']
-                    })
+                with st.expander(f"Transaction {row['TransactionID']} — Account {row['AccountID']}"):
+                    st.markdown(f"""
+                        **TransactionID:** {row['TransactionID']}  
+                        **AccountID:** {row['AccountID']}  
+                        **Date:** {row['TransactionDate']}  
+                        **TransactionAmount:** {row['TransactionAmount']}
+                    """)
+
+                    with st.expander("Reason Flagged"):
+                        reasons = []
+                        if row['TimeSinceLastTxn'] > df_new['TimeSinceLastTxn'].quantile(0.95):
+                            reasons.append(f"Unusual gap since last transaction ({row['PrevTransactionDate']} → {row['TransactionDate']})")
+                        if row['TxnCount_24h'] > df_new['TxnCount_24h'].quantile(0.95):
+                            reasons.append(f"High number of transactions in 24h ({row['TxnCount_24h']})")
+                        if row['TxnCount_1h'] > df_new['TxnCount_1h'].quantile(0.95):
+                            reasons.append(f"High number of transactions in 1h ({row['TxnCount_1h']})")
+                        if row['IsOddHour'] == 1:
+                            reasons.append(f"Transaction at odd hour ({row['Hour']}h)")
+                        if row['MerchantNovelty'] == 1:
+                            reasons.append("New/rare merchant for this account")
+
+                        if reasons:
+                            for r in reasons:
+                                st.write("- " + r)
+                        else:
+                            st.write("No single dominant feature; flagged by anomaly model.")
