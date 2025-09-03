@@ -20,7 +20,7 @@ if uploaded_file is not None:
     st.success(f"Dataset loaded successfully! Shape: {df.shape}")
 
     # ------------------------
-    # 2️⃣ Feature Engineering (match Colab)
+    # 2️⃣ Feature Engineering
     # ------------------------
     features_df = pd.DataFrame()
     features_df['Amt_to_Balance'] = df['TransactionAmount'] / df['AccountBalance']
@@ -84,14 +84,17 @@ if uploaded_file is not None:
     feature_names = joblib.load("feature_names.pkl")
 
     # ------------------------
-    # 4️⃣ Scale + predict anomalies safely
+    # 4️⃣ Safe scaling + predict anomalies
     # ------------------------
     features_df_copy = features_df.copy()
+    # Add missing columns
     for col in feature_names:
         if col not in features_df_copy.columns:
             features_df_copy[col] = 0
+    # Keep only scaler columns and correct order
     features_df_copy = features_df_copy[feature_names]
-    features_df_copy = features_df_copy.fillna(0)
+    # Ensure numeric
+    features_df_copy = features_df_copy.apply(pd.to_numeric, errors='coerce').fillna(0)
 
     X_scaled = scaler.transform(features_df_copy)
     df['AnomalyScore'] = iso_forest.decision_function(X_scaled)
