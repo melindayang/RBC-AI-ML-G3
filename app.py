@@ -86,13 +86,14 @@ if uploaded_file is not None:
     # ------------------------
     # 4️⃣ Scale + predict anomalies safely
     # ------------------------
+    features_df_copy = features_df.copy()
     for col in feature_names:
-        if col not in features_df.columns:
-            features_df[col] = 0
-    features_df = features_df[feature_names]
-    features_df = features_df.fillna(0)
+        if col not in features_df_copy.columns:
+            features_df_copy[col] = 0
+    features_df_copy = features_df_copy[feature_names]
+    features_df_copy = features_df_copy.fillna(0)
 
-    X_scaled = scaler.transform(features_df)
+    X_scaled = scaler.transform(features_df_copy)
     df['AnomalyScore'] = iso_forest.decision_function(X_scaled)
     df['IsAnomaly'] = iso_forest.predict(X_scaled) == -1
 
@@ -163,7 +164,20 @@ if uploaded_file is not None:
                 similar = df[(df['AccountID']==row['AccountID']) & (df['MerchantID']==row['MerchantID']) & (df['TransactionID']!=row['TransactionID'])]
                 st.write("**Similar transactions:**")
                 for sidx, srow in similar.head(10).iterrows():
-                    st.write(f"Transaction {srow['TransactionID']} | Amount {srow['TransactionAmount']} | Date {srow['TransactionDate']}")
+                    with st.expander(f"Transaction {srow['TransactionID']} | Amount {srow['TransactionAmount']} | Date {srow['TransactionDate']}"):
+                        st.write({
+                            "TransactionType": srow.get("TransactionType"),
+                            "Location": srow.get("Location"),
+                            "DeviceID": srow.get("DeviceID"),
+                            "IP Address": srow.get("IP Address"),
+                            "Channel": srow.get("Channel"),
+                            "CustomerAge": srow.get("CustomerAge"),
+                            "CustomerOccupation": srow.get("CustomerOccupation"),
+                            "TransactionDuration": srow.get("TransactionDuration"),
+                            "LoginAttempts": srow.get("LoginAttempts"),
+                            "AccountBalance": srow.get("AccountBalance"),
+                            "PreviousTransactionDate": srow.get("PrevTransactionDate")
+                        })
 
     # ---------------- Merchants ----------------
     with tab2:
