@@ -5,6 +5,7 @@ import joblib
 import shap
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
+from sklearn.cluster import KMeans
 
 st.set_page_config(page_title="Fraud Detection Dashboard", layout="wide")
 st.title("Financial Fraud Detection Dashboard")
@@ -19,19 +20,19 @@ if uploaded_file is not None:
     st.success(f"Dataset loaded successfully! Shape: {df.shape}")
 
     # ------------------------
-    # 2️⃣ Feature Engineering (same as Colab)
+    # 2️⃣ Feature Engineering (match Colab)
     # ------------------------
     features_df = pd.DataFrame()
     features_df['Amt_to_Balance'] = df['TransactionAmount'] / df['AccountBalance']
     avg_amount = df.groupby('AccountID')['TransactionAmount'].transform('mean')
     features_df['Amt_to_AvgAmt'] = df['TransactionAmount'] / avg_amount
     features_df['Duration_to_Amt'] = df['TransactionDuration'] / df['TransactionAmount']
-    
+
     df['TransactionDate'] = pd.to_datetime(df['TransactionDate'], format='%Y-%m-%d %H:%M:%S')
     df_sorted = df.sort_values(['AccountID', 'TransactionDate'])
     df_sorted['PrevTransactionDate'] = df_sorted.groupby('AccountID')['TransactionDate'].shift(1)
     features_df['TimeSinceLastTxn'] = (df_sorted['TransactionDate'] - df_sorted['PrevTransactionDate']).dt.total_seconds()
-    
+
     features_df['TxnCount_24h'] = (
         df_sorted.groupby('AccountID', group_keys=False)
                  .apply(lambda g: g.sort_values('TransactionDate')
@@ -44,7 +45,7 @@ if uploaded_file is not None:
                                   .rolling('1h', on='TransactionDate')
                                   .TransactionDate.count())
     )
-    
+
     # Location anomaly
     location_counts = df['Location'].value_counts()
     df['location_frequency'] = df['Location'].map(location_counts) / len(df)
@@ -53,9 +54,7 @@ if uploaded_file is not None:
     df['is_unusual_location'] = df.apply(lambda row: 0 if row['Location'] == user_normal_locations.get(row['AccountID'], row['Location']) else 1, axis=1)
     user_location_counts = df.groupby('AccountID')['Location'].nunique()
     df['user_location_diversity'] = df['AccountID'].map(user_location_counts)
-    
-    # KMeans location anomaly
-    from sklearn.cluster import KMeans
+
     loc_features = df[['location_frequency','is_unusual_location','user_location_diversity']].values
     loc_features_scaled = StandardScaler().fit_transform(loc_features)
     n_clusters = min(5, len(df['Location'].unique()))
@@ -65,34 +64,34 @@ if uploaded_file is not None:
     distances = [np.linalg.norm(loc_features_scaled[i]-cluster_centers[cluster_labels[i]]) for i in range(len(df))]
     max_distance = max(distances) if distances else 1
     features_df['LocationAnomalyScore'] = [d/max_distance for d in distances]
-    
+
     # Merchant features
     df_sorted['newMerchant'] = (~df_sorted.groupby('AccountID')['MerchantID'].transform(lambda x: x.duplicated())).astype(int)
     merchant_counts = df_sorted.groupby(['AccountID','MerchantID']).size().rename('MerchantCount')
     account_counts = df_sorted.groupby('AccountID').size().rename('AccountTxnCount')
     df_sorted = df_sorted.join(merchant_counts,on=['AccountID','MerchantID']).join(account_counts,on='AccountID')
     df_sorted['MerchantFrequencyScore'] = df_sorted['MerchantCount']/df_sorted['AccountTxnCount']
-    
+
     features_df['TxnAmt'] = df['TransactionAmount']
     features_df['LoginAttempts_log'] = np.log1p(df['LoginAttempts'])
     features_df['TxnDuration'] = df['TransactionDuration']
 
     # ------------------------
-    # 3️⃣ Load scaler, model, feature names
+    # 3️⃣ Load model artifacts
     # ------------------------
     scaler = joblib.load("scaler.pkl")
     iso_forest = joblib.load("isolation_forest.pkl")
     feature_names = joblib.load("feature_names.pkl")
-    
-    # Ensure same order & missing columns filled
+
+    # ------------------------
+    # 4️⃣ Scale + predict anomalies safely
+    # ------------------------
     for col in feature_names:
         if col not in features_df.columns:
             features_df[col] = 0
     features_df = features_df[feature_names]
+    features_df = features_df.fillna(0)
 
-    # ------------------------
-    # 4️⃣ Scale + predict
-    # ------------------------
     X_scaled = scaler.transform(features_df)
     df['AnomalyScore'] = iso_forest.decision_function(X_scaled)
     df['IsAnomaly'] = iso_forest.predict(X_scaled) == -1
@@ -103,8 +102,7 @@ if uploaded_file is not None:
     explainer = shap.TreeExplainer(iso_forest)
     shap_values = explainer.shap_values(X_scaled)
     abs_shap = np.abs(shap_values)
-    
-    # Store non-zero contributions per transaction
+
     feature_flags = []
     shap_flags = []
     for i in range(len(df)):
@@ -115,10 +113,10 @@ if uploaded_file is not None:
     df['SHAPValuesFlagged'] = shap_flags
 
     # ------------------------
-    # 6️⃣ UI: Tabs for Transactions and Merchants
+    # 6️⃣ Dashboard: Tabs
     # ------------------------
     tab1, tab2 = st.tabs(["Suspicious Transactions", "Suspicious Merchants"])
-    
+
     # ---------------- Transactions ----------------
     with tab1:
         suspicious_df = df[df['IsAnomaly']]
@@ -161,7 +159,7 @@ if uploaded_file is not None:
                         if feat in ["newMerchant","MerchantFrequencyScore"]:
                             reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequencyScore']}"
                         st.write("- "+reason)
-                # Similar transactions (same AccountID, same MerchantID)
+                # Similar transactions
                 similar = df[(df['AccountID']==row['AccountID']) & (df['MerchantID']==row['MerchantID']) & (df['TransactionID']!=row['TransactionID'])]
                 st.write("**Similar transactions:**")
                 for sidx, srow in similar.head(10).iterrows():
@@ -171,11 +169,25 @@ if uploaded_file is not None:
     with tab2:
         suspicious_merchants = df[df['IsAnomaly']].groupby('MerchantID').size().sort_values(ascending=False).head(10)
         st.subheader("Top 10 Suspicious Merchants")
-        for merchant_id, count in suspicious_merchants.items():
-            st.markdown(f"### Merchant {merchant_id} ({count} suspicious txns)")
+        for merchant_id, _ in suspicious_merchants.items():
+            st.write(f"**Merchant {merchant_id}**")
             merchant_txns = df[(df['MerchantID']==merchant_id) & (df['IsAnomaly'])]
             for idx, row in merchant_txns.iterrows():
                 with st.expander(f"Transaction {row['TransactionID']} | Account {row['AccountID']} | Amount {row['TransactionAmount']}"):
+                    with st.expander("Additional details"):
+                        st.write({
+                            "TransactionType": row.get("TransactionType"),
+                            "Location": row.get("Location"),
+                            "DeviceID": row.get("DeviceID"),
+                            "IP Address": row.get("IP Address"),
+                            "Channel": row.get("Channel"),
+                            "CustomerAge": row.get("CustomerAge"),
+                            "CustomerOccupation": row.get("CustomerOccupation"),
+                            "TransactionDuration": row.get("TransactionDuration"),
+                            "LoginAttempts": row.get("LoginAttempts"),
+                            "AccountBalance": row.get("AccountBalance"),
+                            "PreviousTransactionDate": row.get("PrevTransactionDate")
+                        })
                     with st.expander("Reason(s) flagged"):
                         for feat, val in zip(row['FeaturesFlagged'], row['SHAPValuesFlagged']):
                             reason = f"{feat} (impact={val:.4f})"
