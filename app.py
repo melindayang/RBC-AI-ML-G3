@@ -77,7 +77,7 @@ threshold = np.percentile(df_new["AnomalyScore"], 5)
 df_new["IsAnomaly"] = df_new["AnomalyScore"] <= threshold
 
 # ------------------------
-# 4️⃣ Rule-based Feature Flagging (balanced across categories)
+# 4️⃣ Rule-based Feature Flagging (balanced with random category weighting)
 # ------------------------
 feature_list = []
 shap_list = []
@@ -105,8 +105,14 @@ for _, row in df_new.iterrows():
     flagged_feats = []
     shap_scores = []
 
-    # ✅ Check each category but limit to 1 per category
-    for cat, feats in feature_categories.items():
+    # 🎲 Randomly choose up to 3 categories (prevents "time" from dominating)
+    category_choices = random.sample(
+        list(feature_categories.keys()),
+        k=min(3, len(feature_categories))
+    )
+
+    for cat in category_choices:
+        feats = feature_categories[cat]
         random.shuffle(feats)  # avoid same feature always picked
         for feat in feats:
             thresh = feature_thresholds.get(feat)
@@ -126,12 +132,6 @@ for _, row in df_new.iterrows():
         random_feat = random.choice(feature_categories[random_cat])
         flagged_feats = [random_feat]
         shap_scores = [round(random.uniform(0.1, 1.0), 4)]
-
-    # ✅ Limit to 3 features max
-    if len(flagged_feats) > 3:
-        chosen = random.sample(range(len(flagged_feats)), 3)
-        flagged_feats = [flagged_feats[i] for i in chosen]
-        shap_scores = [shap_scores[i] for i in chosen]
 
     feature_list.append(flagged_feats)
     shap_list.append(shap_scores)
