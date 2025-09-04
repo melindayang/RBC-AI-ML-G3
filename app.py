@@ -30,7 +30,7 @@ df_new['PrevTransactionDate'] = df_new.groupby('AccountID')['TransactionDate'].s
 df_new['TimeSinceLastTxn'] = (
     (df_new['TransactionDate'] - df_new['PrevTransactionDate'])
     .dt.total_seconds()
-    .fillna(0)
+    .apply(lambda x: x if pd.notna(x) else random.randint(3, 15))
 )
 
 df_new['TxnCount_24h'] = (
@@ -38,7 +38,7 @@ df_new['TxnCount_24h'] = (
     .rolling('24h', on='TransactionDate')['TransactionID']
     .count()
     .reset_index(level=0, drop=True)
-    .apply(lambda x: x if pd.notna(x) else random.randint(3, 10))
+    .apply(lambda x: x if pd.notna(x) else random.randint(3, 15))
 )
 
 df_new['TxnCount_1h'] = (
@@ -46,7 +46,7 @@ df_new['TxnCount_1h'] = (
     .rolling('1h', on='TransactionDate')['TransactionID']
     .count()
     .reset_index(level=0, drop=True)
-    .apply(lambda x: x if pd.notna(x) else random.randint(3, 10))
+    .apply(lambda x: x if pd.notna(x) else random.randint(3, 15))
 )
 
 df_new['Hour'] = df_new['TransactionDate'].dt.hour
@@ -57,6 +57,11 @@ df_new['MerchantNovelty'] = df_new.groupby('AccountID')['MerchantID'].transform(
     lambda x: (~x.duplicated()).astype(int)
 )
 df_new['MerchantFrequency'] = df_new.groupby(['AccountID','MerchantID'])['TransactionID'].transform('count')
+
+# Ensure no NaNs left in engineered features
+for col in ['TimeSinceLastTxn', 'TxnCount_24h', 'TxnCount_1h',
+            'IsOddHour', 'MerchantNovelty', 'MerchantFrequency']:
+    df_new[col] = df_new[col].apply(lambda x: x if pd.notna(x) else random.randint(3, 15))
 
 # ------------------------
 # 3️⃣ Load Scaler & Isolation Forest
@@ -98,7 +103,7 @@ candidate_features = [
 tslt_count = 0
 max_tslt = int(0.25 * len(flagged))  # cap TimeSinceLastTxn at 25%
 novelty_count = 0
-max_novelty = int(0.20 * len(flagged))  # cap MerchantNovelty at 20%
+max_novelty = int(0.20 * len(flagged))  # cap MerchantNovelty (NewMerchant) at 20%
 
 flagged_features = []
 
