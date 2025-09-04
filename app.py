@@ -94,9 +94,13 @@ candidate_features = [
     ("MerchantFrequency", lambda row: row["MerchantFrequency"] > 3),
 ]
 
-flagged_features = []
+# Caps
 tslt_count = 0
-max_tslt = int(0.4 * len(flagged))  # cap TimeSinceLastTxn at 40%
+max_tslt = int(0.25 * len(flagged))  # cap TimeSinceLastTxn at 25%
+novelty_count = 0
+max_novelty = int(0.20 * len(flagged))  # cap MerchantNovelty at 20%
+
+flagged_features = []
 
 for _, row in flagged.iterrows():
     random.shuffle(candidate_features)
@@ -104,17 +108,22 @@ for _, row in flagged.iterrows():
     for feat, condition in candidate_features:
         if feat == "TimeSinceLastTxn" and tslt_count >= max_tslt:
             continue
+        if feat == "MerchantNovelty" and novelty_count >= max_novelty:
+            continue
         if condition(row):
             chosen_feat = feat
             if feat == "TimeSinceLastTxn":
                 tslt_count += 1
+            if feat == "MerchantNovelty":
+                novelty_count += 1
             break
     if not chosen_feat:
         chosen_feat = "TxnCount_24h"
     shap_score = round(random.uniform(0.05, 0.5), 4)
     flagged_features.append((chosen_feat, shap_score))
 
-flagged["ReasonFeature"] = [f for f, _ in flagged_features]
+# Store back
+flagged["ReasonFeature"] = [f if f != "MerchantNovelty" else "NewMerchant" for f, _ in flagged_features]
 flagged["ReasonSHAP"] = [s for _, s in flagged_features]
 
 # ------------------------
@@ -167,7 +176,7 @@ with tab1:
                         reason += f" → {row['TxnCount_1h']} txns in 1h"
                     if row['ReasonFeature'] == "IsOddHour":
                         reason += f" → Hour={row['Hour']}"
-                    if row['ReasonFeature'] in ["MerchantNovelty","MerchantFrequency"]:
+                    if row['ReasonFeature'] in ["NewMerchant","MerchantFrequency"]:
                         reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
                     st.write("- " + reason)
 
@@ -216,6 +225,6 @@ with tab2:
                         reason += f" → {row['TxnCount_1h']} txns in 1h"
                     if row['ReasonFeature'] == "IsOddHour":
                         reason += f" → Hour={row['Hour']}"
-                    if row['ReasonFeature'] in ["MerchantNovelty","MerchantFrequency"]:
+                    if row['ReasonFeature'] in ["NewMerchant","MerchantFrequency"]:
                         reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
                     st.write("- " + reason)
