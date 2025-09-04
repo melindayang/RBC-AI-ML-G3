@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import shap
 import random
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import euclidean_distances
@@ -30,18 +31,12 @@ df_new['PrevTransactionDate'] = df_new.groupby('AccountID')['TransactionDate'].s
 df_new['TimeSinceLastTxn'] = (
     (df_new['TransactionDate'] - df_new['PrevTransactionDate']).dt.total_seconds().fillna(0)
 )
-df_new['TxnCount_24h'] = (
-    df_new.groupby('AccountID')
-    .rolling('24h', on='TransactionDate')['TransactionID']
-    .count()
-    .reset_index(level=0, drop=True)
-)
-df_new['TxnCount_1h'] = (
-    df_new.groupby('AccountID')
-    .rolling('1h', on='TransactionDate')['TransactionID']
-    .count()
-    .reset_index(level=0, drop=True)
-)
+df_new['TxnCount_24h'] = df_new.groupby('AccountID').rolling(
+    '24h', on='TransactionDate'
+)['TransactionID'].count().reset_index(level=0, drop=True)
+df_new['TxnCount_1h'] = df_new.groupby('AccountID').rolling(
+    '1h', on='TransactionDate'
+)['TransactionID'].count().reset_index(level=0, drop=True)
 df_new['Hour'] = df_new['TransactionDate'].dt.hour
 df_new['IsOddHour'] = df_new['Hour'].apply(lambda x: 1 if x < 6 or x > 22 else 0)
 
@@ -49,9 +44,7 @@ df_new['IsOddHour'] = df_new['Hour'].apply(lambda x: 1 if x < 6 or x > 22 else 0
 df_new['MerchantNovelty'] = df_new.groupby('AccountID')['MerchantID'].transform(
     lambda x: (~x.duplicated()).astype(int)
 )
-df_new['MerchantFrequency'] = df_new.groupby(['AccountID', 'MerchantID'])[
-    'TransactionID'
-].transform('count')
+df_new['MerchantFrequency'] = df_new.groupby(['AccountID','MerchantID'])['TransactionID'].transform('count')
 
 # ------------------------
 # 3️⃣ Load Scaler & Isolation Forest
@@ -59,7 +52,7 @@ df_new['MerchantFrequency'] = df_new.groupby(['AccountID', 'MerchantID'])[
 scaler = joblib.load("scaler.pkl")
 iso_forest = joblib.load("isolation_forest.pkl")
 
-if hasattr(scaler, "feature_names_in_"):
+if hasattr(scaler, 'feature_names_in_'):
     for col in scaler.feature_names_in_:
         if col not in df_new.columns:
             df_new[col] = 0
@@ -72,12 +65,12 @@ else:
 X_scaled = scaler.transform(features_df)
 
 # Anomaly score
-df_new["AnomalyScore"] = iso_forest.decision_function(X_scaled)
-threshold = np.percentile(df_new["AnomalyScore"], 5)
-df_new["IsAnomaly"] = df_new["AnomalyScore"] <= threshold
+df_new['AnomalyScore'] = iso_forest.decision_function(X_scaled)
+threshold = np.percentile(df_new['AnomalyScore'], 5)
+df_new['IsAnomaly'] = df_new['AnomalyScore'] <= threshold
 
 # ------------------------
-# 4️⃣ Rule-based Feature Flagging (balanced with random category weighting)
+# 4️⃣ Rule-based Feature Flagging (with 25% cap on TimeSinceLastTxn)
 # ------------------------
 feature_list = []
 shap_list = []
@@ -89,7 +82,7 @@ feature_categories = {
     "behavior": ["IsOddHour"],
 }
 
-# Compute thresholds adaptively
+# Adaptive thresholds
 feature_thresholds = {}
 for feats in feature_categories.values():
     for feat in feats:
@@ -101,11 +94,15 @@ for feats in feature_categories.values():
         else:
             feature_thresholds[feat] = None
 
+# 🚨 Hard cap: TimeSinceLastTxn max 25% of anomalies
+max_time_since = int(0.25 * len(df_new[df_new["IsAnomaly"]]))
+time_since_used = 0
+
 for _, row in df_new.iterrows():
     flagged_feats = []
     shap_scores = []
 
-    # 🎲 Randomly choose up to 3 categories (prevents "time" from dominating)
+    # 🎲 Randomly choose up to 3 categories
     category_choices = random.sample(
         list(feature_categories.keys()),
         k=min(3, len(feature_categories))
@@ -113,18 +110,26 @@ for _, row in df_new.iterrows():
 
     for cat in category_choices:
         feats = feature_categories[cat]
-        random.shuffle(feats)  # avoid same feature always picked
+        random.shuffle(feats)
         for feat in feats:
             thresh = feature_thresholds.get(feat)
             if thresh is None or pd.isna(thresh):
                 continue
             value = row[feat]
+
+            # 🚨 Skip TimeSinceLastTxn if cap reached
+            if feat == "TimeSinceLastTxn" and time_since_used >= max_time_since:
+                continue
+
             if (feat == "IsOddHour" and value == 1) or (
                 feat != "IsOddHour" and value > thresh
             ):
                 flagged_feats.append(feat)
                 shap_scores.append(round(random.uniform(0.1, 1.0), 4))
-                break  # stop after one feature per category
+
+                if feat == "TimeSinceLastTxn":
+                    time_since_used += 1
+                break  # one feature per category
 
     # ✅ Ensure at least 1 reason always
     if len(flagged_feats) == 0:
@@ -145,21 +150,13 @@ df_new["SHAPValuesFlagged"] = shap_list
 tab1, tab2 = st.tabs(["Suspicious Transactions", "Suspicious Merchants"])
 
 extra_cols = [
-    "TransactionType",
-    "Location",
-    "DeviceID",
-    "IPAddress",
-    "Channel",
-    "CustomerAge",
-    "CustomerOccupation",
-    "TransactionDuration",
-    "LoginAttempts",
-    "AccountBalance",
-    "PrevTransactionDate",
+    "TransactionType","Location","DeviceID","IPAddress","Channel",
+    "CustomerAge","CustomerOccupation","TransactionDuration",
+    "LoginAttempts","AccountBalance","PrevTransactionDate"
 ]
 
 distances = euclidean_distances(X_scaled, X_scaled)
-flagged = df_new[df_new["IsAnomaly"]].copy()
+flagged = df_new[df_new['IsAnomaly']].copy()
 
 # ------------------------
 # Tab 1: Suspicious Transactions
@@ -170,49 +167,38 @@ with tab1:
         st.info("No suspicious transactions detected at 5% threshold")
     else:
         items_per_page = 10
-        total_pages = int(np.ceil(len(flagged) / items_per_page))
+        total_pages = int(np.ceil(len(flagged)/items_per_page))
         page = st.number_input("Page", 1, total_pages, 1)
-        start_idx = (page - 1) * items_per_page
+        start_idx = (page-1)*items_per_page
         end_idx = start_idx + items_per_page
         page_data = flagged.iloc[start_idx:end_idx]
 
         for _, row in page_data.iterrows():
-            with st.expander(
-                f"Transaction {row['TransactionID']} — Account {row['AccountID']}"
-            ):
-                st.markdown(
-                    f"""
+            with st.expander(f"Transaction {row['TransactionID']} — Account {row['AccountID']}"):
+                st.markdown(f"""
                     **TransactionID:** {row['TransactionID']}  
                     **AccountID:** {row['AccountID']}  
                     **MerchantID:** {row['MerchantID']}  
                     **Date:** {row['TransactionDate']}  
                     **TransactionAmount:** {row.get('TransactionAmount', 'N/A')}
-                """
-                )
+                """)
                 with st.expander("Additional Details"):
                     st.write({col: row.get(col, None) for col in extra_cols})
 
                 with st.expander("Reason(s) flagged"):
-                    if len(row["FeaturesFlagged"]) == 0:
-                        st.write("Flagged by anomaly model (no dominant feature)")
-                    else:
-                        for feat, val in zip(
-                            row["FeaturesFlagged"], row["SHAPValuesFlagged"]
-                        ):
-                            reason = f"{feat} (impact={val:.4f})"
-                            if feat == "TimeSinceLastTxn":
-                                reason += f" → TransactionDate={row['TransactionDate']}, PrevTransactionDate={row['PrevTransactionDate']}"
-                            if feat == "TxnCount_24h":
-                                reason += f" → {row['TxnCount_24h']} txns in 24h"
-                            if feat == "TxnCount_1h":
-                                reason += f" → {row['TxnCount_1h']} txns in 1h"
-                            if feat == "IsOddHour":
-                                reason += f" → Hour={row['Hour']}"
-                            if feat in ["MerchantNovelty", "MerchantFrequency"]:
-                                reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
-                            if feat == "TransactionAmount":
-                                reason += f" → Amount={row.get('TransactionAmount','N/A')}"
-                            st.write("- " + reason)
+                    for feat, val in zip(row['FeaturesFlagged'], row['SHAPValuesFlagged']):
+                        reason = f"{feat} (impact={val:.4f})"
+                        if feat == "TimeSinceLastTxn":
+                            reason += f" → TransactionDate={row['TransactionDate']}, PrevTransactionDate={row['PrevTransactionDate']}"
+                        if feat == "TxnCount_24h":
+                            reason += f" → {row['TxnCount_24h']} txns in 24h"
+                        if feat == "TxnCount_1h":
+                            reason += f" → {row['TxnCount_1h']} txns in 1h"
+                        if feat == "IsOddHour":
+                            reason += f" → Hour={row['Hour']}"
+                        if feat in ["MerchantNovelty","MerchantFrequency"]:
+                            reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
+                        st.write("- " + reason)
 
                 # Similar transactions
                 with st.expander("Similar Transactions (non-anomalous)"):
@@ -220,20 +206,16 @@ with tab1:
                     dists = distances[txn_idx]
                     similar_idx = np.argsort(dists)[1:21]
                     similar = df_new.iloc[similar_idx]
-                    similar = similar[~similar["IsAnomaly"]].head(10)
+                    similar = similar[~similar['IsAnomaly']].head(10)
                     for _, srow in similar.iterrows():
-                        with st.expander(
-                            f"Txn {srow['TransactionID']} — Account {srow['AccountID']}"
-                        ):
-                            st.markdown(
-                                f"""
+                        with st.expander(f"Txn {srow['TransactionID']} — Account {srow['AccountID']}"):
+                            st.markdown(f"""
                                 **TransactionID:** {srow['TransactionID']}  
                                 **AccountID:** {srow['AccountID']}  
                                 **MerchantID:** {srow['MerchantID']}  
                                 **Date:** {srow['TransactionDate']}  
                                 **TransactionAmount:** {srow.get('TransactionAmount','N/A')}
-                            """
-                            )
+                            """)
                             with st.expander("Additional Details"):
                                 st.write({col: srow.get(col, None) for col in extra_cols})
 
@@ -242,42 +224,29 @@ with tab1:
 # ------------------------
 with tab2:
     st.subheader("Top 10 Suspicious Merchants")
-    top_merchants = (
-        flagged.groupby("MerchantID").size().sort_values(ascending=False).head(10).index
-    )
+    top_merchants = flagged.groupby('MerchantID').size().sort_values(ascending=False).head(10).index
     for merchant in top_merchants:
         st.markdown(f"### Merchant {merchant}")
-        merchant_txns = flagged[flagged["MerchantID"] == merchant]
+        merchant_txns = flagged[flagged['MerchantID']==merchant]
         for _, row in merchant_txns.iterrows():
-            with st.expander(
-                f"Transaction {row['TransactionID']} — Account {row['AccountID']}"
-            ):
-                st.markdown(
-                    f"""
+            with st.expander(f"Transaction {row['TransactionID']} — Account {row['AccountID']}"):
+                st.markdown(f"""
                     **TransactionID:** {row['TransactionID']}  
                     **AccountID:** {row['AccountID']}  
                     **Date:** {row['TransactionDate']}  
                     **TransactionAmount:** {row.get('TransactionAmount','N/A')}
-                """
-                )
+                """)
                 with st.expander("Reason(s) flagged"):
-                    if len(row["FeaturesFlagged"]) == 0:
-                        st.write("Flagged by anomaly model (no dominant feature)")
-                    else:
-                        for feat, val in zip(
-                            row["FeaturesFlagged"], row["SHAPValuesFlagged"]
-                        ):
-                            reason = f"{feat} (impact={val:.4f})"
-                            if feat == "TimeSinceLastTxn":
-                                reason += f" → TransactionDate={row['TransactionDate']}, PrevTransactionDate={row['PrevTransactionDate']}"
-                            if feat == "TxnCount_24h":
-                                reason += f" → {row['TxnCount_24h']} txns in 24h"
-                            if feat == "TxnCount_1h":
-                                reason += f" → {row['TxnCount_1h']} txns in 1h"
-                            if feat == "IsOddHour":
-                                reason += f" → Hour={row['Hour']}"
-                            if feat in ["MerchantNovelty", "MerchantFrequency"]:
-                                reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
-                            if feat == "TransactionAmount":
-                                reason += f" → Amount={row.get('TransactionAmount','N/A')}"
-                            st.write("- " + reason)
+                    for feat, val in zip(row['FeaturesFlagged'], row['SHAPValuesFlagged']):
+                        reason = f"{feat} (impact={val:.4f})"
+                        if feat == "TimeSinceLastTxn":
+                            reason += f" → TransactionDate={row['TransactionDate']}, PrevTransactionDate={row['PrevTransactionDate']}"
+                        if feat == "TxnCount_24h":
+                            reason += f" → {row['TxnCount_24h']} txns in 24h"
+                        if feat == "TxnCount_1h":
+                            reason += f" → {row['TxnCount_1h']} txns in 1h"
+                        if feat == "IsOddHour":
+                            reason += f" → Hour={row['Hour']}"
+                        if feat in ["MerchantNovelty","MerchantFrequency"]:
+                            reason += f" → MerchantID={row['MerchantID']}, frequency={row['MerchantFrequency']}"
+                        st.write("- " + reason)
